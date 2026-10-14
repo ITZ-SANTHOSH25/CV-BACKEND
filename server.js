@@ -174,6 +174,7 @@ if (supplied.length === 0) {
     addLog('Alert', `Emergency alert sent to ${supplied.length} contacts`, `${reason} · ${location} · Alert ID: ${alertId}`, 'alert', createdAt);
     return alertId;
   });
+  });
   const alertId = create();
   res.status(201).json({ ok: true, alert: getAlert(alertId) });
 });
