@@ -133,8 +133,30 @@ app.get('/api/alerts', (_req, res) => {
 app.post('/api/alerts', (req, res) => {
   const reason = String(req.body.reason || 'Emergency alert').trim();
   const location = String(req.body.location || '').trim();
-  const supplied = Array.isArray(req.body.recipients) ? req.body.recipients : [];
-  if (!supplied.length) return res.status(400).json({ ok: false, message: 'At least one alert recipient is required.' });
+ // Use recipients supplied by the caller when available.
+// Otherwise, load registered family/neighbourhood contacts.
+let supplied = Array.isArray(req.body.recipients)
+  ? req.body.recipients.filter(r =>
+      r &&
+      String(r.name || '').trim() &&
+      String(r.phone || '').trim()
+    )
+  : [];
+
+if (supplied.length === 0) {
+  supplied = db.prepare(`
+    SELECT id, name, phone, relation
+    FROM contacts
+    ORDER BY id DESC
+  `).all();
+}
+
+if (supplied.length === 0) {
+  return res.status(400).json({
+    ok: false,
+    message: 'No registered emergency contacts found. Register at least one contact first.'
+  });
+}
   const createdAt = req.body.createdAt && !Number.isNaN(Date.parse(req.body.createdAt)) ? new Date(req.body.createdAt).toISOString() : now();
   const create = db.transaction(() => {
     const result = db.prepare('INSERT INTO alerts (reason,location,status,created_at,updated_at) VALUES (?,?,?,?,?)').run(reason, location, 'active', createdAt, createdAt);
@@ -148,6 +170,7 @@ app.post('/api/alerts', (req, res) => {
       const contact = Number.isFinite(possibleId) && possibleId > 0 ? db.prepare('SELECT id FROM contacts WHERE id=?').get(possibleId) : null;
       insertRecipient.run(alertId, contact ? contact.id : null, name, phone, String(r.relation || 'Neighbourhood'), 'pending', createdAt);
     }
+    for (const r of supplied) {
     addLog('Alert', `Emergency alert sent to ${supplied.length} contacts`, `${reason} · ${location} · Alert ID: ${alertId}`, 'alert', createdAt);
     return alertId;
   });
