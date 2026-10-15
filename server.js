@@ -1,134 +1,117 @@
-'use strict';
-
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const Database = require('better-sqlite3');
-
-const app = express();
-app.use(cors({ origin: true, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
-app.use(express.json({ limit: '1mb' }));
-
-// On Render, set DB_PATH=/var/data/carvanta.db and attach a persistent disk at /var/data.
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'data', 'carvanta.db');
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS contacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    phone TEXT NOT NULL UNIQUE,
-    relation TEXT NOT NULL DEFAULT 'Neighbourhood',
-    type TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    reason TEXT NOT NULL,
-    location TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS alert_recipients (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    alert_id INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
-    contact_id INTEGER,
-    name TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    relation TEXT NOT NULL DEFAULT 'Neighbourhood',
-    status TEXT NOT NULL DEFAULT 'pending',
-    response TEXT,
-    responded_at TEXT,
-    created_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_alert_recipients_alert ON alert_recipients(alert_id);
-  CREATE TABLE IF NOT EXISTS activity_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL DEFAULT 'System',
-    message TEXT NOT NULL,
-    detail TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'ok',
-    time TEXT NOT NULL
-  );
-`);
-
-const now = () => new Date().toISOString();
-const log = db.prepare('INSERT INTO activity_logs (type,message,detail,status,time) VALUES (?,?,?,?,?)');
-function addLog(type, message, detail = '', status = 'ok', time = now()) {
-  log.run(type, message, detail, status, time);
-}
-function cleanContact(row) {
-  return { id: row.id, name: row.name, phone: row.phone, relation: row.relation, type: row.type, createdAt: row.created_at, updatedAt: row.updated_at };
-}
-function getAlert(id) {
-  const alert = db.prepare('SELECT * FROM alerts WHERE id = ?').get(Number(id));
-  if (!alert) return null;
-  const recipients = db.prepare('SELECT * FROM alert_recipients WHERE alert_id = ? ORDER BY id').all(alert.id).map(r => ({
-    id: r.id, contactId: r.contact_id, name: r.name, phone: r.phone, relation: r.relation,
-    status: r.status, response: r.response, respondedAt: r.responded_at
-  }));
-  return { id: alert.id, reason: alert.reason, location: alert.location, status: alert.status, createdAt: alert.created_at, updatedAt: alert.updated_at, recipients };
-}
-
-app.get('/', (_req, res) => res.json({ ok: true, service: 'CARVANTA Emergency API', message: 'Backend is running', endpoints: ['/api/health', '/api/contacts', '/api/alerts', '/api/logs'] }));
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'CARVANTA Emergency API', database: 'connected', time: now() }));
-
-// CONTACTS: neighbourhood/family contact CRUD
-app.get('/api/contacts', (_req, res) => {
-  const contacts = db.prepare('SELECT * FROM contacts ORDER BY id DESC').all().map(cleanContact);
-  res.json({ ok: true, contacts });
-});
-app.post('/api/contacts', (req, res) => {
-  const name = String(req.body.name || '').trim();
-  const phone = String(req.body.phone || req.body.mobile || '').trim();
-  const relation = String(req.body.relation || req.body.relationship || 'Neighbourhood').trim();
-  const type = String(req.body.type || '').trim();
-  if (!name || !phone) return res.status(400).json({ ok: false, message: 'Name and phone number are required.' });
-  if (!/^[+0-9()\-\s]{7,20}$/.test(phone)) return res.status(400).json({ ok: false, message: 'Enter a valid phone number.' });
-  if (db.prepare('SELECT id FROM contacts WHERE phone = ?').get(phone)) return res.status(409).json({ ok: false, message: 'This phone number is already registered.' });
-  const time = now();
-  const result = db.prepare('INSERT INTO contacts (name,phone,relation,type,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(name, phone, relation, type, time, time);
-  const contact = cleanContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(result.lastInsertRowid));
-  addLog('System', 'Emergency contact added', `${contact.name} · ${contact.phone} · ${contact.relation}`, 'ok');
-  res.status(201).json({ ok: true, contact });
-});
-app.put('/api/contacts/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const old = db.prepare('SELECT * FROM contacts WHERE id = ?').get(id);
-  if (!old) return res.status(404).json({ ok: false, message: 'Contact not found.' });
-  const name = String(req.body.name ?? old.name).trim();
-  const phone = String(req.body.phone ?? old.phone).trim();
-  const relation = String(req.body.relation ?? req.body.relationship ?? old.relation).trim();
-  const type = String(req.body.type ?? old.type).trim();
-  if (!name || !phone) return res.status(400).json({ ok: false, message: 'Name and phone number are required.' });
+// ALERTS: Create an alert and notify all registered emergency contacts.
+app.post('/api/alerts', (req, res) => {
   try {
-    db.prepare('UPDATE contacts SET name=?, phone=?, relation=?, type=?, updated_at=? WHERE id=?').run(name, phone, relation, type, now(), id);
-  } catch (e) {
-    if (String(e.code).includes('SQLITE_CONSTRAINT')) return res.status(409).json({ ok: false, message: 'This phone number is already registered.' });
-    throw e;
-  }
-  const contact = cleanContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(id));
-  addLog('System', 'Emergency contact updated', `${contact.name} · ${contact.phone}`, 'ok');
-  res.json({ ok: true, contact });
-});
-app.delete('/api/contacts/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(id);
-  if (!contact) return res.status(404).json({ ok: false, message: 'Contact not found.' });
-  db.prepare('DELETE FROM contacts WHERE id = ?').run(id);
-  addLog('System', 'Emergency contact removed', `${contact.name} · ${contact.phone}`, 'warn');
-  res.json({ ok: true, message: 'Contact deleted.' });
-});
+    const reason = String(req.body?.reason || 'Emergency alert').trim();
+    const location = String(
+      req.body?.location || 'Unknown location'
+    ).trim();
 
-// ALERTS: create an alert and create a status row for each registered recipient
-app.get('/api/alerts', (_req, res) => {
-  const rows = db.prepare("SELECT id FROM alerts WHERE status NOT IN ('ended','resolved','cancelled') ORDER BY id DESC").all();
-  res.json({ ok: true, alerts: rows.map(row => getAlert(row.id)) });
+    // Prefer explicitly supplied recipients when valid.
+    let recipients = Array.isArray(req.body?.recipients)
+      ? req.body.recipients.filter(
+          r =>
+            r &&
+            String(r.name || '').trim() &&
+            String(r.phone || '').trim()
+        )
+      : [];
+
+    // Otherwise, use registered emergency contacts.
+    if (recipients.length === 0) {
+      recipients = db.prepare(`
+        SELECT id, name, phone, relation
+        FROM contacts
+        ORDER BY id DESC
+      `).all();
+    }
+
+    if (recipients.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'No registered emergency contacts found. Register at least one contact first.'
+      });
+    }
+
+    const createdAt =
+      req.body?.createdAt &&
+      !Number.isNaN(Date.parse(req.body.createdAt))
+        ? new Date(req.body.createdAt).toISOString()
+        : now();
+
+    const createAlert = db.transaction(() => {
+      const result = db.prepare(`
+        INSERT INTO alerts
+          (reason, location, status, created_at, updated_at)
+        VALUES (?, ?, 'active', ?, ?)
+      `).run(reason, location, createdAt, createdAt);
+
+      const alertId = Number(result.lastInsertRowid);
+
+      const insertRecipient = db.prepare(`
+        INSERT INTO alert_recipients
+          (alert_id, contact_id, name, phone, relation, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
+      `);
+
+      let insertedCount = 0;
+
+      for (const recipient of recipients) {
+        const name = String(recipient.name || '').trim();
+        const phone = String(recipient.phone || '').trim();
+
+        if (!name || !phone) continue;
+
+        const possibleId = Number(recipient.id);
+
+        const contact =
+          Number.isFinite(possibleId) && possibleId > 0
+            ? db.prepare(
+                'SELECT id FROM contacts WHERE id = ?'
+              ).get(possibleId)
+            : null;
+
+        insertRecipient.run(
+          alertId,
+          contact ? contact.id : null,
+          name,
+          phone,
+          String(recipient.relation || 'Neighbourhood'),
+          createdAt
+        );
+
+        insertedCount++;
+      }
+
+      if (insertedCount === 0) {
+        throw new Error('No valid alert recipients could be inserted.');
+      }
+
+      addLog(
+        'Alert',
+        `Emergency alert sent to ${insertedCount} contacts`,
+        `${reason} · ${location} · Alert ID: ${alertId}`,
+        'alert',
+        createdAt
+      );
+
+      return alertId;
+    });
+
+    const alertId = createAlert();
+
+    return res.status(201).json({
+      ok: true,
+      alert: getAlert(alertId)
+    });
+  } catch (error) {
+    console.error('Emergency alert creation failed:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Failed to create emergency alert.',
+      error: error.message
+    });
+  }
 });
 app.post('/api/alerts', (req, res) => {
   const reason = String(req.body.reason || 'Emergency alert').trim();
