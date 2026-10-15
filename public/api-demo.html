@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CARVANTA API · Demo Console</title>
+<style>
+  :root { --bg:#06070a; --surface:#12151d; --surface2:#171b25; --border:#262c3a;
+          --red:#ff2b3d; --text:#eef1f7; --soft:#aab1c2; --mute:#6c7488; --green:#24d17e; --cyan:#22d3ee; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:Inter,system-ui,-apple-system,sans-serif;
+         min-height:100vh; padding:28px; }
+  body::before { content:''; position:fixed; inset:0; pointer-events:none;
+    background:radial-gradient(900px 600px at 12% -5%, rgba(255,43,61,.10), transparent 60%); }
+  .wrap { position:relative; max-width:1180px; margin:0 auto; }
+  header { display:flex; align-items:center; gap:14px; margin-bottom:22px; }
+  .logo { width:44px; height:44px; border-radius:12px; display:grid; place-items:center; font-size:22px;
+          background:linear-gradient(135deg,var(--red),#c8102e); box-shadow:0 14px 40px -18px rgba(255,43,61,.55); }
+  h1 { font-size:20px; letter-spacing:.3px; }
+  header p { color:var(--soft); font-size:13px; }
+  .grid { display:grid; grid-template-columns:340px 1fr; gap:20px; }
+  @media (max-width:900px){ .grid{ grid-template-columns:1fr; } }
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:18px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:1.4px; color:var(--mute); margin-bottom:12px; }
+  .group { margin-bottom:16px; }
+  .group b { display:block; font-size:12px; color:var(--cyan); margin-bottom:8px; letter-spacing:.4px; }
+  button { font-family:inherit; cursor:pointer; border:1px solid var(--border); background:var(--surface2);
+           color:var(--text); border-radius:9px; padding:8px 11px; font-size:12px; margin:0 6px 6px 0; transition:.15s; }
+  button:hover { border-color:var(--red); color:#fff; background:#1e2330; }
+  button.primary { background:var(--red); border-color:var(--red); color:#fff; font-weight:600; }
+  button.primary:hover { background:#ff4d5e; }
+  .out-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  .status { font-size:12px; padding:4px 10px; border-radius:20px; background:rgba(36,209,126,.14); color:var(--green); }
+  .status.err { background:rgba(255,59,59,.14); color:#ff3b3b; }
+  pre { background:#0a0c11; border:1px solid var(--border); border-radius:12px; padding:16px; overflow:auto;
+        max-height:640px; font-family:'Share Tech Mono',ui-monospace,monospace; font-size:12.5px; line-height:1.55; color:#d7dcea; }
+  .hint { color:var(--mute); font-size:12px; margin-top:10px; }
+  a { color:var(--cyan); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🚑</div>
+    <div>
+      <h1>CARVANTA API · Demo Console</h1>
+      <p>Click any action to call the REST API. Responses appear on the right. <a href="/">← Back to dashboard</a></p>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Actions</h2>
+
+      <div class="group"><b>META</b>
+        <button data-act="health">GET /health</button>
+        <button data-act="summary">GET /summary</button>
+      </div>
+
+      <div class="group"><b>AMBULANCES</b>
+        <button data-act="ambList">GET /ambulances</button>
+        <button data-act="ambAvail">GET ?status=available</button>
+        <button data-act="ambNear">GET ?sort=distance</button>
+      </div>
+
+      <div class="group"><b>HOSPITALS</b>
+        <button data-act="hospList">GET /hospitals</button>
+        <button data-act="hospIcu">GET ?facility=icuBeds</button>
+        <button data-act="hospBlood">GET ?blood=O-</button>
+      </div>
+
+      <div class="group"><b>BYSTANDER</b>
+        <button data-act="bystander">GET /bystander</button>
+        <button data-act="nearest">GET /bystander/nearest</button>
+      </div>
+
+      <div class="group"><b>CONTACTS</b>
+        <button data-act="contacts">GET /contacts</button>
+        <button data-act="contactAdd" class="primary">POST /contacts</button>
+      </div>
+
+      <div class="group"><b>ALERTS</b>
+        <button data-act="alertTrigger" class="primary">POST /alerts (trigger)</button>
+        <button data-act="alerts">GET /alerts</button>
+      </div>
+
+      <div class="group"><b>LOGS</b>
+        <button data-act="logs">GET /logs</button>
+        <button data-act="logStats">GET /logs/stats</button>
+      </div>
+
+      <div class="group"><b>WATCH</b>
+        <button data-act="watchConnect">POST /watch/connect</button>
+        <button data-act="watchRead" class="primary">POST /watch/readings (fall)</button>
+        <button data-act="watchFalls">GET /watch/falls</button>
+      </div>
+
+      <p class="hint">Tip: run <code>npm run reset</code> to restore the seed data.</p>
+    </div>
+
+    <div class="panel">
+      <div class="out-head">
+        <h2 style="margin:0">Response</h2>
+        <span class="status" id="status">ready</span>
+      </div>
+      <pre id="out">Click an action to begin…</pre>
+    </div>
+  </div>
+</div>
+
+<script src="/api-client.js"></script>
+<script>
+  var out = document.getElementById('out');
+  var statusEl = document.getElementById('status');
+
+  function show(label, promise) {
+    statusEl.className = 'status';
+    statusEl.textContent = 'loading…';
+    out.textContent = '→ ' + label + '\n\n…';
+    promise.then(function (data) {
+      statusEl.textContent = '200 OK';
+      out.textContent = '→ ' + label + '\n\n' + JSON.stringify(data, null, 2);
+    }).catch(function (err) {
+      statusEl.className = 'status err';
+      statusEl.textContent = (err.status || 'ERR') + ' ' + err.message;
+      out.textContent = '→ ' + label + '\n\nERROR ' + (err.status || '') + ': ' + err.message +
+        (err.details ? '\n\n' + JSON.stringify(err.details, null, 2) : '');
+    });
+  }
+
+  var actions = {
+    health:        function () { return ['GET /api/health', CarvantaAPI.health()]; },
+    summary:       function () { return ['GET /api/summary', CarvantaAPI.summary()]; },
+    ambList:       function () { return ['GET /api/ambulances', CarvantaAPI.listAmbulances()]; },
+    ambAvail:      function () { return ['GET /api/ambulances?status=available', CarvantaAPI.listAmbulances({ status: 'available' })]; },
+    ambNear:       function () { return ['GET /api/ambulances?sort=distance', CarvantaAPI.listAmbulances({ sort: 'distance' })]; },
+    hospList:      function () { return ['GET /api/hospitals', CarvantaAPI.listHospitals()]; },
+    hospIcu:       function () { return ['GET /api/hospitals?facility=icuBeds', CarvantaAPI.listHospitals({ facility: 'icuBeds' })]; },
+    hospBlood:     function () { return ['GET /api/hospitals?blood=O-', CarvantaAPI.listHospitals({ blood: 'O-' })]; },
+    bystander:     function () { return ['GET /api/bystander', CarvantaAPI.getBystander()]; },
+    nearest:       function () { return ['GET /api/bystander/nearest', CarvantaAPI.nearest()]; },
+    contacts:      function () { return ['GET /api/contacts', CarvantaAPI.listContacts()]; },
+    contactAdd:    function () { return ['POST /api/contacts', CarvantaAPI.createContact({ name: 'Demo User', phone: '+1 555 0000', relation: 'Family', type: 'Demo' })]; },
+    alertTrigger:  function () { return ['POST /api/alerts', CarvantaAPI.triggerAlert({ reason: 'Demo alert from console' })]; },
+    alerts:        function () { return ['GET /api/alerts', CarvantaAPI.listAlerts()]; },
+    logs:          function () { return ['GET /api/logs?limit=20', CarvantaAPI.listLogs({ limit: 20 })]; },
+    logStats:      function () { return ['GET /api/logs/stats', CarvantaAPI.logStats()]; },
+    watchConnect:  function () { return ['POST /api/watch/connect', CarvantaAPI.connectWatch()]; },
+    watchRead:     function () { return ['POST /api/watch/readings (high impact)', CarvantaAPI.postReading({ ax: 1.4, ay: -1.7, az: 3.0, hr: 118 })]; },
+    watchFalls:    function () { return ['GET /api/watch/falls', CarvantaAPI.listFalls()]; }
+  };
+
+  document.querySelectorAll('[data-act]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var fn = actions[btn.dataset.act];
+      if (!fn) return;
+      var r = fn();
+      show(r[0], r[1]);
+    });
+  });
+</script>
+</body>
+</html>
