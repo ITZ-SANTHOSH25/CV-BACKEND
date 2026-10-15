@@ -20,9 +20,6 @@ app.use(express.json({ limit: '1mb' }));
 // DATABASE SETUP
 // --------------------------------------------------
 
-// On Render, set DB_PATH=/var/data/carvanta.db
-// and attach a persistent disk mounted at /var/data.
-
 const dbPath =
   process.env.DB_PATH ||
   path.join(__dirname, 'data', 'carvanta.db');
@@ -406,7 +403,6 @@ app.get('/api/alerts', (_req, res) => {
 
 // --------------------------------------------------
 // ALERTS: CREATE EMERGENCY ALERT
-// Uses registered contacts when recipients are omitted.
 // --------------------------------------------------
 
 app.post('/api/alerts', (req, res) => {
@@ -418,7 +414,6 @@ app.post('/api/alerts', (req, res) => {
     req.body.location || ''
   ).trim();
 
-  // First use recipients provided by the frontend or device.
   let supplied = Array.isArray(req.body.recipients)
     ? req.body.recipients.filter(r =>
         r &&
@@ -427,7 +422,6 @@ app.post('/api/alerts', (req, res) => {
       )
     : [];
 
-  // If the ESP32 sends no recipients, use saved contacts.
   if (supplied.length === 0) {
     supplied = db.prepare(`
       SELECT id, name, phone, relation
@@ -436,7 +430,6 @@ app.post('/api/alerts', (req, res) => {
     `).all();
   }
 
-  // Do not create an alert with no recipients.
   if (supplied.length === 0) {
     return res.status(400).json({
       ok: false,
@@ -512,7 +505,6 @@ app.post('/api/alerts', (req, res) => {
       WHERE alert_id = ?
     `).get(alertId).count;
 
-    // If all supplied entries were invalid, roll back the alert.
     if (recipientCount === 0) {
       throw new Error('No valid recipients could be saved.');
     }
@@ -557,7 +549,6 @@ app.post(
       });
     }
 
-    // Accept either the alert-recipient ID or the contact ID.
     const recipient = db.prepare(`
       SELECT *
       FROM alert_recipients
@@ -618,14 +609,9 @@ app.post(
       recipient.id
     );
 
-    const action =
-      response === 'acknowledged'
-        ? 'acknowledged'
-        : 'declined';
-
     addLog(
       'Acknowledgement',
-      `${recipient.name} ${action} emergency alert`,
+      `${recipient.name} ${response} emergency alert`,
       `Alert ID: ${alertId} · ${recipient.phone} · ${respondedAt}`,
       response === 'acknowledged' ? 'ok' : 'warn',
       respondedAt
@@ -641,7 +627,8 @@ app.post(
     if (pending === 0) {
       db.prepare(`
         UPDATE alerts
-        SET status = ?, updated_at = ?
+        SET status = ?,
+            updated_at = ?
         WHERE id = ?
       `).run('resolved', now(), alertId);
     }
@@ -678,6 +665,15 @@ app.post('/api/alerts/:id/acknowledge', (req, res) => {
     });
   }
 
+  if (['resolved', 'cancelled', 'ended'].includes(alert.status)) {
+    return res.json({
+      ok: true,
+      alertId,
+      status: alert.status,
+      message: 'This alert has already been closed.'
+    });
+  }
+
   const acknowledgedAt =
     req.body.acknowledgedAt &&
     !Number.isNaN(Date.parse(req.body.acknowledgedAt))
@@ -685,12 +681,19 @@ app.post('/api/alerts/:id/acknowledge', (req, res) => {
       : now();
 
   const who = String(
-    req.body.acknowledgedBy || 'recipient-device'
+    req.body.acknowledgedBy || 'dashboard-device'
   );
+
+  db.prepare(`
+    UPDATE alerts
+    SET status = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run('resolved', acknowledgedAt, alertId);
 
   addLog(
     'Acknowledgement',
-    'Emergency alert acknowledged on recipient device',
+    'Emergency alert acknowledged on dashboard',
     `Alert ID: ${alertId} · By: ${who} · ${acknowledgedAt}`,
     'ok',
     acknowledgedAt
@@ -699,8 +702,70 @@ app.post('/api/alerts/:id/acknowledge', (req, res) => {
   res.json({
     ok: true,
     alertId,
+    status: 'acknowledged',
     acknowledgedAt,
-    message: 'Device acknowledgement saved to activity log.'
+    message: 'Emergency alert acknowledged successfully.'
+  });
+});
+
+// --------------------------------------------------
+// DEVICE-LEVEL DECLINE
+// --------------------------------------------------
+
+app.post('/api/alerts/:id/decline', (req, res) => {
+  const alertId = Number(req.params.id);
+
+  const alert = db.prepare(
+    'SELECT * FROM alerts WHERE id = ?'
+  ).get(alertId);
+
+  if (!alert) {
+    return res.status(404).json({
+      ok: false,
+      message: 'Alert not found.'
+    });
+  }
+
+  if (['resolved', 'cancelled', 'ended'].includes(alert.status)) {
+    return res.json({
+      ok: true,
+      alertId,
+      status: alert.status,
+      message: 'This alert has already been closed.'
+    });
+  }
+
+  const declinedAt =
+    req.body.declinedAt &&
+    !Number.isNaN(Date.parse(req.body.declinedAt))
+      ? new Date(req.body.declinedAt).toISOString()
+      : now();
+
+  const who = String(
+    req.body.declinedBy || 'dashboard-device'
+  );
+
+  db.prepare(`
+    UPDATE alerts
+    SET status = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run('cancelled', declinedAt, alertId);
+
+  addLog(
+    'Acknowledgement',
+    'Emergency alert declined on dashboard',
+    `Alert ID: ${alertId} · By: ${who} · ${declinedAt}`,
+    'warn',
+    declinedAt
+  );
+
+  res.json({
+    ok: true,
+    alertId,
+    status: 'declined',
+    declinedAt,
+    message: 'Emergency alert declined successfully.'
   });
 });
 
